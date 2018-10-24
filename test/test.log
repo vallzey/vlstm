@@ -1,0 +1,5 @@
+2018-10-20 09:41:39,621 - simple - DEBUG - [test_logging.py:<module>:58] debug message
+2018-10-20 09:41:39,622 - simple - INFO - [test_logging.py:<module>:59] info message
+2018-10-20 09:41:39,622 - simple - WARNING - [test_logging.py:<module>:60] warn message
+2018-10-20 09:41:39,622 - simple - ERROR - [test_logging.py:<module>:61] error message
+2018-10-20 09:41:39,622 - simple - CRITICAL - [test_logging.py:<module>:62] critical message
