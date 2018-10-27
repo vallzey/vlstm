@@ -17,7 +17,7 @@ from lasagne.layers import BatchNormLayer
 from tgate import OutGate, TimeGate
 
 
-class VLSTMLayer(MergeLayer):
+class VTLSTM2Layer(MergeLayer):
     def __init__(self,
                  incoming,  # 输入层输出	(batch size, SEQ_LENGTH, num_features)
                  num_units,  # 隐藏层单元个数 (128)
@@ -40,19 +40,19 @@ class VLSTMLayer(MergeLayer):
                  mask_input=None,  # 输入层有效序列(1 1 1 1 1 1 ... 0 0 0 0) (batch size, SEQ_LENGTH)
                  only_return_final=False,
                  bn=False,
+                 tgate1=TimeGate(),  # add 添加时间门
                  **kwargs):
         # 建立incomings作为所有输入层的list,并将incoming作为第一个元素
         incomings = [incoming]
+        # add 时间作为必要输入
+        incomings.append(time_input)
+        self.time_incoming_index = len(incomings) - 1
 
-        self.time_incoming_index = -1
         self.mask_incoming_index = -1
         self.hid_init_incoming_index = -1
         self.cell_init_incoming_index = -1
 
         # v:MergeLayer可以有多个输入层,可以使用append将输入层叠加,然后调用父类的__init__初始化
-        if time_input is not None:
-            incomings.append(time_input)
-            self.time_incoming_index = len(incomings) - 1
         if mask_input is not None:
             incomings.append(mask_input)
             self.mask_incoming_index = len(incomings) - 1
@@ -62,7 +62,7 @@ class VLSTMLayer(MergeLayer):
         if isinstance(cell_init, Layer):
             incomings.append(cell_init)
             self.cell_init_incoming_index = len(incomings) - 1
-        super(VLSTMLayer, self).__init__(incomings, **kwargs)
+        super(VTLSTM2Layer, self).__init__(incomings, **kwargs)
 
         # If the provided nonlinearity is None, make it linear
         if nonlinearity is None:
@@ -71,7 +71,7 @@ class VLSTMLayer(MergeLayer):
             self.nonlinearity = nonlinearity
 
         # v:多个变量不知道什么意思
-        self.learn_init = learn_init  # 不知道什么意思 default:false
+        self.learn_init = learn_init  # 不知道什么意思 default:false 可能没有什么用
         self.num_units = num_units  # default:128
         self.backwards = backwards  # 不知道什么意思 default:false
         self.peepholes = peepholes  # 不知道什么意思 default:true
@@ -88,18 +88,15 @@ class VLSTMLayer(MergeLayer):
         # 验证输入向量
         # input_shapes是自带的方法,用于查看输入的维度
         input_shape = self.input_shapes[0]
-        batch_size, seq_length, input_ndim = input_shape  # (None,None,500) 500为one-hot
-        if time_input is not None:
-            time_shape = self.input_shapes[1]
+        # add
+        time_shape = self.input_shapes[1]
 
         if unroll_scan and input_shape[1] is None:
             raise ValueError("Input sequence length cannot be specified as "
                              "None when unroll_scan is True")
 
-        num_inputs = input_ndim
-        # 如果有时间输入,将num_inputs+1,这个主要用于构造权重矩阵时使用
-        if time_input is not None:
-            num_inputs += 1
+        # 返回给定轴上的数组元素的乘积。
+        num_inputs = np.prod(input_shape[2:])
 
         def add_gate_params(gate, gate_name):
             """ Convenience function for adding layer parameters from a Gate
@@ -113,6 +110,30 @@ class VLSTMLayer(MergeLayer):
                                    regularizable=False),
                     gate.nonlinearity)
 
+        def add_outgate_params(gate, gate_name):
+            return (self.add_param(gate.W_in, (num_inputs, num_units),
+                                   name="W_in_to_{}".format(gate_name)),
+                    self.add_param(gate.W_hid, (num_units, num_units),
+                                   name="W_hid_to_{}".format(gate_name)),
+                    self.add_param(gate.W_to, (1, num_units),
+                                   name="W_to_to_{}".format(gate_name)),
+                    self.add_param(gate.b, (num_units,),
+                                   name="b_{}".format(gate_name),
+                                   regularizable=False),
+                    gate.nonlinearity)
+
+        # add
+        def add_timegate_params(gate, gate_name):
+            return (self.add_param(gate.W_t, (1, num_units),
+                                   name="W_t_to_{}".format(gate_name)),
+                    self.add_param(gate.W_x, (num_inputs, num_units),
+                                   name="W_x_to_{}".format(gate_name)),
+                    self.add_param(gate.b, (num_units,),
+                                   name="b_{}".format(gate_name)),
+                    gate.nonlinearity_inside,
+                    gate.nonlinearity_outside
+                    )
+
         # 添加LSTM的输入门
         (self.W_in_to_ingate, self.W_hid_to_ingate, self.b_ingate,
          self.nonlinearity_ingate) = add_gate_params(ingate, 'ingate')
@@ -122,8 +143,12 @@ class VLSTMLayer(MergeLayer):
         # 添加LSTM的单元(cell)
         (self.W_in_to_cell, self.W_hid_to_cell, self.b_cell, self.nonlinearity_cell) = add_gate_params(cell, 'cell')
         # 添加LSTM的输出门
-        (self.W_in_to_outgate, self.W_hid_to_outgate, self.b_outgate, self.nonlinearity_outgate) = add_gate_params(
-            outgate, 'outgate')
+        (self.W_in_to_outgate, self.W_hid_to_outgate, self.W_to_to_outgate,
+         self.b_outgate,
+         self.nonlinearity_outgate) = add_outgate_params(outgate, 'outgate')
+        # add
+        (self.W_t1_to_tg1, self.W_x1_to_tg1, self.b1_tg1, self.nonlinearity_inside_tg1,
+         self.nonlinearity_outside_tg1) = add_timegate_params(tgate1, 'tgate1')
 
         # 如果启用了peepholes（单元到门）连接，则初始化peepholes连接。
         # 即cell的输出会通到输入门,输出门,忘记门
@@ -155,7 +180,7 @@ class VLSTMLayer(MergeLayer):
         # 如果bn为true,则构造BatchNormLayer,This layer implements batch normalization of its inputs.
         # self.params.update(self.bn.params)?似乎是对所有的参数进行标准化
         if bn:
-            self.bn = lasagne.layers.BatchNormLayer((batch_size, seq_length, num_inputs), axes=(0, 1))
+            self.bn = lasagne.layers.BatchNormLayer(input_shape, axes=(0, 1))
             self.params.update(self.bn.params)
         else:
             self.bn = False
@@ -189,11 +214,7 @@ class VLSTMLayer(MergeLayer):
         if self.cell_init_incoming_index > 0:
             cell_init = inputs[self.cell_init_incoming_index]
 
-        if self.time_incoming_index > 0:
-            time_mat = inputs[self.time_incoming_index]
-            time_mat = time_mat.dimshuffle(0, 1, 'x')
-            # 将时间拼接到输入的第三维中
-            input = T.concatenate([input, time_mat], axis=2)
+        time_mat = inputs[self.time_incoming_index]
 
         # 如果ndim>3,则折叠input的后面的尺寸
         '''
@@ -210,12 +231,19 @@ class VLSTMLayer(MergeLayer):
 
         # 交换1 2维的数据
         input = input.dimshuffle(1, 0, 2)
+        # (n_time_steps, n_batch)
+        # add
+        time_input = time_mat.dimshuffle(1, 0, 'x')
+        time_seq_len, time_num_batch, _ = time_input.shape
         seq_len, num_batch, _ = input.shape
 
         # 合成 (500*(num_units*4)) vector
+        # 同时添加一个权重矩阵
         W_in_stacked = T.concatenate(
             [self.W_in_to_ingate, self.W_in_to_forgetgate,
-             self.W_in_to_cell, self.W_in_to_outgate], axis=1)
+             self.W_in_to_cell, self.W_in_to_outgate,
+             self.W_x1_to_tg1],  # add
+            axis=1)
 
         W_hid_stacked = T.concatenate(
             [self.W_hid_to_ingate, self.W_hid_to_forgetgate,
@@ -223,25 +251,54 @@ class VLSTMLayer(MergeLayer):
         # 合成 (4*num_units) vector
         b_stacked = T.concatenate(
             [self.b_ingate, self.b_forgetgate,
-             self.b_cell, self.b_outgate], axis=0)
+             self.b_cell, self.b_outgate,
+             self.b1_tg1  # add 添加时间的偏置
+             ], axis=0)
+
+        # add t只有和两个矩阵相乘
+        # Stack delta time weight matrices into a (1, 2* num_units)
+        W_t_stacked = T.concatenate([self.W_to_to_outgate, self.W_t1_to_tg1], axis=1)
 
         if self.precompute_input:
             # Because the input is given for all time steps, we can
             # precompute_input the inputs dot weight matrices before scanning.
             # W_in_stacked is (n_features, 4*num_units). input is then
             # (n_time_steps, n_batch, 4*num_units).
+            # add 输入预计算
+            time_input = T.dot(time_input, W_t_stacked)
             input = T.dot(input, W_in_stacked) + b_stacked
 
         # When theano.scan calls step, input_n will be (n_batch, 4*num_units).
         # We define a slicing function that extract the input to each LSTM gate
-        def slice_w(x, n):
-            return x[:, n * self.num_units:(n + 1) * self.num_units]
+        # change
+        def slice_w(x, start, stride=1):
+            return x[:, start * self.num_units:(start + stride) * self.num_units]
 
         # Create single recurrent computation step function
         # input_n is the n'th vector of the input
-        def step(input_n, cell_previous, hid_previous, *args):
+        def step(input_n, time_input_n, cell_previous, hid_previous, *args):
+            # 之前已经有预计算的时候,这里不用,但是不知道什么用
+            # 可能在这里是分步计算
             if not self.precompute_input:
+                # add
+                # time_input_n是time序列中的一个输入
+                # 之前time_input_n(n_batch,'x')
+                # time_input_n(n_time_steps, n_batch,'x')
+                time_input_n = T.dot(time_input_n, W_t_stacked)
+                # 之前input_n(n_batch, n_features)
+                # input_n(n_time_steps, n_batch, num_units)
                 input_n = T.dot(input_n, W_in_stacked) + b_stacked
+
+            # 通过分片的函数,将输入的数据分成几个部分,
+            # 这几个部分分别对应一块,
+            # 如 tm_wto_n表示t和wto相乘的块
+            # add
+            tm_wto_n = slice_w(time_input_n, 0)
+            tm_w1_n = slice_w(time_input_n, 1)
+            tm_w1_n = self.nonlinearity_inside_tg1(tm_w1_n)
+            tm1_xwb_n = slice_w(input_n, 4)
+            timegate1 = self.nonlinearity_outside_tg1(tm_w1_n + tm1_xwb_n)
+            input_n = slice_w(input_n, 0, 4)
 
             # Calculate gates pre-activations and slice
             gates = input_n + T.dot(hid_previous, W_hid_stacked)
@@ -256,6 +313,8 @@ class VLSTMLayer(MergeLayer):
             forgetgate = slice_w(gates, 1)
             cell_input = slice_w(gates, 2)
             outgate = slice_w(gates, 3)
+            # add outgate 的在输出到激活函数之前,会添加一个tm
+            outgate += tm_wto_n
 
             if self.peepholes:
                 # Compute peephole connections
@@ -268,7 +327,8 @@ class VLSTMLayer(MergeLayer):
             cell_input = self.nonlinearity_cell(cell_input)
 
             # Compute new cell value
-            cell = forgetgate * cell_previous + ingate * cell_input
+            # add 在cell中,后面的乘项增加一个
+            cell = forgetgate * cell_previous + ingate * timegate1 * cell_input
 
             if self.peepholes:
                 outgate += cell * self.W_cell_to_outgate
@@ -278,8 +338,12 @@ class VLSTMLayer(MergeLayer):
             hid = outgate * self.nonlinearity(cell)
             return [cell, hid]
 
-        def step_masked(input_n, mask_n, cell_previous, hid_previous, *args):
-            cell, hid = step(input_n, cell_previous, hid_previous, *args)
+        def step_masked(input_n,
+                        time_input_n,  # add 添加时间的输入
+                        mask_n, cell_previous, hid_previous, *args):
+            cell, hid = step(input_n,
+                             time_input_n,  # add 添加时间的输入
+                             cell_previous, hid_previous, *args)
 
             # Skip over any input with mask 0 by copying the previous
             # hidden state; proceed normally for any input with mask 1.
@@ -295,23 +359,28 @@ class VLSTMLayer(MergeLayer):
             # (1, 0, ‘x’) -> AxB to BxAx(可广播的维度)
             mask = mask.dimshuffle(1, 0, 'x')
             # input(seq_len,batch_size,n_feature),mask(seq_len, batch_size,(可广播的维度))
-            sequences = [input, mask]
+            # add 这里设置sequences,可能是用于后面的scan
+            sequences = [input, time_input, mask]
             step_fun = step_masked
         else:
-            sequences = input
+            # add
+            sequences = [input, time_input]
             step_fun = step
 
         # 后面不太懂
         ones = T.ones((num_batch, 1))
         if not isinstance(self.cell_init, Layer):
             # Dot against a 1s vector to repeat to shape (num_batch, num_units)
+            # ones(num_batch,1) self.cell(1,num_units)
             cell_init = T.dot(ones, self.cell_init)
 
         if not isinstance(self.hid_init, Layer):
             # Dot against a 1s vector to repeat to shape (num_batch, num_units)
+            # ones(num_batch,1) self.hid(1,num_units)
             hid_init = T.dot(ones, self.hid_init)
 
         # The hidden-to-hidden weight matrix is always used in step
+        # 权重属于不变的量
         non_seqs = [W_hid_stacked]
         # The "peephole" weight matrices are only used when self.peepholes=True
         if self.peepholes:
@@ -340,7 +409,7 @@ class VLSTMLayer(MergeLayer):
             # applies the step function
             cell_out, hid_out = theano.scan(
                 fn=step_fun,
-                sequences=sequences,
+                sequences=sequences,  # [input, time_input, mask]
                 outputs_info=[cell_init, hid_init],
                 go_backwards=self.backwards,
                 truncate_gradient=self.gradient_steps,

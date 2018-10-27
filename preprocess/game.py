@@ -6,15 +6,19 @@ import os
 
 BASE_DIR = 'data'
 DATA_SOURCE = 'game'
-user_detail_path = os.path.join(BASE_DIR, DATA_SOURCE, 'than1000USERDETAIL.csv')
-game_detial_path = os.path.join(BASE_DIR, DATA_SOURCE, 'than1000GAMEDETAIL.csv')
-
+user_detail_path = os.path.join(BASE_DIR, DATA_SOURCE, 't500_1000USERDETAIL.csv')
 user_item_record = os.path.join(BASE_DIR, DATA_SOURCE, 'user-item.lst')
 user_item_delta_time_record = os.path.join(BASE_DIR, DATA_SOURCE, 'user-item-delta-time.lst')
 user_item_accumulate_time_record = os.path.join(BASE_DIR, DATA_SOURCE, 'user-item-accumulate-time.lst')
 index2game_path = os.path.join(BASE_DIR, DATA_SOURCE, 'index2item')
 game2index_path = os.path.join(BASE_DIR, DATA_SOURCE, 'item2index')
-
+# 如果存在,直接读取
+if os.path.exists(index2game_path) and os.path.exists(user_item_record):
+    index2game = pickle.load(open(index2game_path, 'rb'))
+    print('Total game %d' % len(index2game))
+    user_item_list = pd.read_csv(user_item_record,header=None)
+    print('Total user %d' % len(user_item_list))
+    exit(0)
 
 def generate_data():
     out_ui = open(user_item_record, 'w')

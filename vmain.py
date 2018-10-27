@@ -17,15 +17,17 @@ from lstm import LSTMLayer
 from tlstm1 import TLSTM1Layer
 from tlstm2 import TLSTM2Layer
 from tlstm3 import TLSTM3Layer
+from vlstm import VLSTMLayer
+from vtlstm import VTLSTMLayer
 from plstm import PLSTMLayer, PLSTMTimeGate
 from tgate import OutGate, TimeGate
 
 theano.config.floatX = 'float32'
 
 parser = argparse.ArgumentParser(description='Specific model, data and other params.')
-parser.add_argument('--model', type=str, default='LSTM',
+parser.add_argument('--model', type=str, default='TLSTM1',
                     help='Model to train:LSTM, LSTM_T, PLSTM, TLSTM1, TLSTM2, TLSTM2.')
-parser.add_argument('--data', type=str, default='game', help='Input data source: music, citeulike.')
+parser.add_argument('--data', type=str, default='game', help='Input data source: music, citeulike, game.')
 parser.add_argument('--fixed_epochs', type=int, default=10, help='Number of epochs in the first stage.')
 parser.add_argument('--num_epochs', type=int, default=20,
                     help='Number of epochs in the first and second stage.')  # 循环次数
@@ -36,8 +38,10 @@ parser.add_argument('--sample_time', type=int, default=3,
 
 parser.add_argument('--batch_size', type=int, default=5, help='Batch size in the training phase.')
 parser.add_argument('--test_batch', type=int, default=5, help='Batch size in the testing phase')
-parser.add_argument('--vocab_size', type=int, default=500, help='Vocabulary size')  # 当one-hot时,一般指物品数量
-parser.add_argument('--max_len', type=int, default=6000, help='Maximum length of the sequence.')  # 指序列长度
+# 需要修改
+parser.add_argument('--vocab_size', type=int, default=1050, help='Vocabulary size 500 1050')  # 当one-hot时,一般指物品数量
+# 需要修改
+parser.add_argument('--max_len', type=int, default=1000, help='Maximum length of the sequence.')  # 指序列长度
 parser.add_argument('--grad_clip', type=int, default=0,
                     help='Maximum grad step. Grad will be cliped if greater than this. 0 means no clip')
 parser.add_argument('--debug', dest='debug', action='store_true',
@@ -85,7 +89,7 @@ TEST_BATCH = args.test_batch
 # Number of units in the two hidden (LSTM) layers
 SAMPLE_TIME = args.sample_time
 # 打印频次
-PRINT_FREQ = 2
+PRINT_FREQ = 50
 # Use one hot vector to represent input data
 ONE_HOT = True
 if DEBUG:
@@ -194,7 +198,7 @@ def main(num_epochs=NUM_EPOCHS, vocab_size=VOCAB_SIZE):
 
     if MODEL_TYPE == 'LSTM':
         l_t = lasagne.layers.InputLayer(shape=(None, None)) if USE_TIME_INPUT else None
-        l_forward = LSTMLayer(
+        l_forward = VLSTMLayer(
             l_in,
             time_input=l_t,
             mask_input=l_mask,
@@ -210,22 +214,44 @@ def main(num_epochs=NUM_EPOCHS, vocab_size=VOCAB_SIZE):
             nonlinearity=lasagne.nonlinearities.tanh,
             bn=BN,
             only_return_final=False)
-
+    elif MODEL_TYPE == 'TLSTM1':
+        l_t = lasagne.layers.InputLayer(shape=(None, None))
+        l_forward = VTLSTMLayer(
+            l_in,
+            time_input=l_t,
+            num_units=N_HIDDEN,
+            mask_input=l_mask,
+            peepholes=True,
+            ingate=lasagne.layers.Gate(),
+            forgetgate=lasagne.layers.Gate(),
+            cell=lasagne.layers.Gate(W_cell=None, nonlinearity=lasagne.nonlinearities.tanh),
+            outgate=OutGate(),
+            nonlinearity=lasagne.nonlinearities.tanh,
+            cell_init=lasagne.init.Constant(0.),
+            hid_init=lasagne.init.Constant(0.),
+            grad_clipping=GRAD_CLIP,
+            only_return_final=False,
+            bn=BN,
+        )
     else:
         logging.info('没有这种模型类型')
         exit(0)
 
     target_values = T.matrix('target_values', dtype='int32')
+
     # v:输出层(N_HIDDEN,vocab_size)
+    # 调用了l_forward中get_output_shape_for()方法
     l_out = lasagne.layers.DenseLayer(l_forward, num_units=vocab_size, W=lasagne.init.Normal(),
                                       num_leading_axes=2, nonlinearity=None)
 
     # 获取输出层的输出(None, None, 500)
+    # 调用了l_forward中get_output_for()方法
     network_output = lasagne.layers.get_output(l_out)
 
-    # (2, 0, 1) -> AxBxC to CxAxB()
+    # (2, 0, 1) -> AxBxC to CxAxB
     # (0, ‘x’, 1) -> AxB to Ax1xB
     # (1, ‘x’, 0) -> AxB to Bx1xA
+    # 因为在处理输出的时候,将数据的1 2维互换了,所以要换回来
     network_output = network_output.dimshuffle(1, 0, 2)
 
     def calculate_softmax(n_input):
@@ -296,8 +322,8 @@ def main(num_epochs=NUM_EPOCHS, vocab_size=VOCAB_SIZE):
 
         for idx in range(total_size):
             gnd = test_y[idx]
-            probs = probs_all_time[idx, lengths[idx] - 1, :]    # 取每一个test的最后一个的预测值,一个500维的向量
-            prob_index = np.argsort(probs)[-1::-1].tolist()     # argsort函数返回的是数组值从小到大的索引值[3 1 2]-->[1 2 0]
+            probs = probs_all_time[idx, lengths[idx] - 1, :]  # 取每一个test的最后一个的预测值,一个500维的向量
+            prob_index = np.argsort(probs)[-1::-1].tolist()  # argsort函数返回的是数组值从小到大的索引值[3 1 2]-->[1 2 0]
             gnd_rate = prob_index.index(gnd) + 1
             rate_sum += gnd_rate
             # Sample multiple times to reduce randomness
